@@ -62,7 +62,7 @@ const app = new Elysia()
       exp: "7d",
     })
   )
-  .derive(async ({ headers, jwt }) => {
+  .derive(async ({ query, headers, jwt }) => {
     const auth = headers["authorization"];
     const token = auth && auth.startsWith("Bearer ") ? auth.slice(7) : null;
     if (!token) return { user: null };
@@ -192,6 +192,99 @@ const app = new Elysia()
       return { access_token: token };
     }
   )
+  .group("/sip", (app) =>
+    app.get(
+      "/calls",
+      async ({ query, user, set }) => {
+        if (!user) {
+          set.status = 401;
+          return { error: "You are unauthorized" };
+        }
+
+        let where_clauses: string[] = [];
+
+        if (query.call_id) {
+          where_clauses.push(`sid = '${query.call_id}'`);
+        }
+        if (query.create_date) {
+          where_clauses.push(`create_date = '${query.create_date}'`);
+        }
+        if (query.caller) {
+          if (query.caller.includes("*")) {
+            where_clauses.push(
+              `caller like '${query.caller.replace(/\*/g, "%")}'`
+            );
+          } else {
+            where_clauses.push(`caller = '${query.caller}'`);
+          }
+        }
+        if (query.callee) {
+          if (query.callee.includes("*")) {
+            where_clauses.push(
+              `callee like '${query.callee.replace(/\*/g, "%")}'`
+            );
+          } else {
+            where_clauses.push(`callee = '${query.callee}'`);
+          }
+        }
+        if (query.sip_status) {
+          if (query.sip_status.includes("*")) {
+            where_clauses.push(
+              `sip_status like '${query.sip_status.replace(/\*/g, "%")}'`
+            );
+          } else {
+            where_clauses.push(`sip_status = '${query.sip_status}'`);
+          }
+        }
+
+        let qq = `
+          select sid, create_date, start_date, end_date, caller, callee, sip_status
+          from hep_brief_call_records
+          where start_date >= '${query.start_date}' and start_date <= '${query.end_date}'
+        `;
+
+        let count_qq = `
+          select count(*) as total
+          from hep_brief_call_records
+          where start_date >= '${query.start_date}' and start_date <= '${query.end_date}'
+        `;
+
+        if (where_clauses.length > 0) {
+          qq += "and " + where_clauses.join(" and ");
+          count_qq += "and " + where_clauses.join(" and ");
+        }
+
+        const count_res = await sql.unsafe(count_qq);
+        const count_total = count_res[0].total;
+
+        const offset = (query.page - 1) * query.per_page;
+        qq += `order by start_date desc limit ${query.per_page} offset ${offset}`;
+        const calls = await sql.unsafe(qq);
+        const total_pages = Math.ceil(count_total / query.per_page);
+
+        return {
+          calls: calls,
+          page: query.page,
+          page_size: query.per_page,
+          total: count_total,
+          total_pages: total_pages,
+        };
+      },
+      {
+        query: t.Object({
+          call_id: t.Optional(t.String()),
+          caller: t.Optional(t.String()),
+          callee: t.Optional(t.String()),
+          sip_status: t.Optional(t.String()),
+          page: t.Integer({ minimum: 1, default: 1 }),
+          per_page: t.Integer({ minimum: 5, default: 15, maximum: 500 }),
+          start_date: t.String({ format: "date-time" }),
+          end_date: t.String({ format: "date-time" }),
+          create_date: t.Optional(t.String({ format: "date-time" })),
+        }),
+      }
+    )
+  )
   .group("/users", (app) =>
     app
       .get("/all", async ({ user, set }) => {
@@ -251,7 +344,7 @@ const app = new Elysia()
       })
       .post(
         "create",
-        async ({ body, set, jwt, jwt_refresh, cookie: { auth }, user }) => {
+        async ({ body, set, user }) => {
           if (!user) {
             set.status = 401;
             return { error: "You are unauthorized" };
