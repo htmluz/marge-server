@@ -148,6 +148,8 @@ const app = new Elysia()
         set.status = 403;
         return { error: "Invalid refresh_token" };
       }
+      console.log(id, exp);
+      console.log(jwtPayload);
       const now = new Date(Date.now());
       const expDate = new Date(exp * 1000);
       if (now > expDate) {
@@ -155,9 +157,10 @@ const app = new Elysia()
         return { error: "Expired refresh_token, please sign in again" };
       }
       const db_token = await sql`
-      select token, user_id, expires_at
-      from refresh_tokens where token = ${auth.value}
-    `;
+        select token, user_id, expires_at
+        from refresh_tokens where token = ${auth.value}
+      `;
+      console.log("aaa", db_token);
       if (
         !db_token ||
         db_token[0].user_id != id ||
