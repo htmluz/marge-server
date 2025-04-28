@@ -148,8 +148,6 @@ const app = new Elysia()
         set.status = 403;
         return { error: "Invalid refresh_token" };
       }
-      console.log(id, exp);
-      console.log(jwtPayload);
       const now = new Date(Date.now());
       const expDate = new Date(exp * 1000);
       if (now > expDate) {
@@ -160,7 +158,6 @@ const app = new Elysia()
         select token, user_id, expires_at
         from refresh_tokens where token = ${auth.value}
       `;
-      console.log("aaa", db_token);
       if (
         !db_token ||
         db_token[0].user_id != id ||
@@ -196,97 +193,233 @@ const app = new Elysia()
     }
   )
   .group("/sip", (app) =>
-    app.get(
-      "/calls",
-      async ({ query, user, set }) => {
-        if (!user) {
-          set.status = 401;
-          return { error: "You are unauthorized" };
-        }
-
-        let where_clauses: string[] = [];
-
-        if (query.call_id) {
-          where_clauses.push(`sid = '${query.call_id}'`);
-        }
-        if (query.create_date) {
-          where_clauses.push(`create_date = '${query.create_date}'`);
-        }
-        if (query.caller) {
-          if (query.caller.includes("*")) {
-            where_clauses.push(
-              `caller like '${query.caller.replace(/\*/g, "%")}'`
-            );
-          } else {
-            where_clauses.push(`caller = '${query.caller}'`);
+    app
+      .get(
+        "/calls",
+        async ({ query, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
           }
-        }
-        if (query.callee) {
-          if (query.callee.includes("*")) {
-            where_clauses.push(
-              `callee like '${query.callee.replace(/\*/g, "%")}'`
-            );
-          } else {
-            where_clauses.push(`callee = '${query.callee}'`);
-          }
-        }
-        if (query.sip_status) {
-          if (query.sip_status.includes("*")) {
-            where_clauses.push(
-              `sip_status like '${query.sip_status.replace(/\*/g, "%")}'`
-            );
-          } else {
-            where_clauses.push(`sip_status = '${query.sip_status}'`);
-          }
-        }
 
-        let qq = `
+          let where_clauses: string[] = [];
+
+          if (query.sid) {
+            if (query.sid.includes("*")) {
+              where_clauses.push(`sid like '${query.sid.replace(/\*/g, "%")}'`);
+            } else {
+              where_clauses.push(`sid = '${query.sid}'`);
+            }
+          }
+          if (query.create_date) {
+            where_clauses.push(`create_date = '${query.create_date}'`);
+          }
+          if (query.caller) {
+            if (query.caller.includes("*")) {
+              where_clauses.push(
+                `caller like '${query.caller.replace(/\*/g, "%")}'`
+              );
+            } else {
+              where_clauses.push(`caller = '${query.caller}'`);
+            }
+          }
+          if (query.callee) {
+            if (query.callee.includes("*")) {
+              where_clauses.push(
+                `callee like '${query.callee.replace(/\*/g, "%")}'`
+              );
+            } else {
+              where_clauses.push(`callee = '${query.callee}'`);
+            }
+          }
+          if (query.sip_status) {
+            if (query.sip_status.includes("*")) {
+              where_clauses.push(
+                `sip_status like '${query.sip_status.replace(/\*/g, "%")}'`
+              );
+            } else {
+              where_clauses.push(`sip_status = '${query.sip_status}'`);
+            }
+          }
+
+          let qq = `
           select sid, create_date, start_date, end_date, caller, callee, sip_status
           from hep_brief_call_records
           where start_date >= '${query.start_date}' and start_date <= '${query.end_date}'
         `;
 
-        let count_qq = `
+          let count_qq = `
           select count(*) as total
           from hep_brief_call_records
           where start_date >= '${query.start_date}' and start_date <= '${query.end_date}'
         `;
 
-        if (where_clauses.length > 0) {
-          qq += "and " + where_clauses.join(" and ");
-          count_qq += "and " + where_clauses.join(" and ");
+          if (where_clauses.length > 0) {
+            qq += "and " + where_clauses.join(" and ");
+            count_qq += "and " + where_clauses.join(" and ");
+          }
+
+          const count_res = await sql.unsafe(count_qq);
+          const count_total = count_res[0].total;
+
+          const offset = (query.page - 1) * query.per_page;
+          qq += `order by start_date desc limit ${query.per_page} offset ${offset}`;
+          const calls = await sql.unsafe(qq);
+          const total_pages = Math.ceil(count_total / query.per_page);
+
+          return {
+            calls: calls,
+            page: query.page,
+            page_size: query.per_page,
+            total: count_total,
+            total_pages: total_pages,
+          };
+        },
+        {
+          query: t.Object({
+            sid: t.Optional(t.String()),
+            caller: t.Optional(t.String()),
+            callee: t.Optional(t.String()),
+            sip_status: t.Optional(t.String()),
+            page: t.Integer({ minimum: 1, default: 1 }),
+            per_page: t.Integer({ minimum: 5, default: 15, maximum: 500 }),
+            start_date: t.String({ format: "date-time" }),
+            end_date: t.String({ format: "date-time" }),
+            create_date: t.Optional(t.String({ format: "date-time" })),
+          }),
         }
+      )
+      .get(
+        "/call-detail",
+        async ({ query, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
+          }
+          const call_ids = query.sids;
+          if (call_ids.length < 1) return { detail: [] };
+          // const calls = await sql`
+          //   select sid, json_agg(
+          //     to_jsonb(hep_proto_1_call) - sid
+          //     order by
+          //       (protocol_header->>'timeSeconds')::bigint,
+          //       (protocol_header->>'timeUseconds')::bigint
+          //   ) as calls
+          //   from hep_proto_1_call where sid in ${sql(call_ids)}
+          //   group by sid
+          // `;
+          // TODO: fix multiple calls
+          // TODO: implement rtcp
+          const calls = await sql`
+            select sid, json_agg(
+              to_jsonb(hep_proto_1_call) - sid
+              order by 
+                (protocol_header->>'timeSeconds')::bigint,
+                (protocol_header->>'timeUseconds')::bigint
+            ) as messages
+            from hep_proto_1_call where sid = ${call_ids[0]}
+            group by sid
+          `;
+          return { detail: calls };
+        },
+        {
+          query: t.Object({
+            sids: t.Array(t.String()),
+            rtcp: t.Boolean(),
+          }),
+        }
+      )
+      .get(
+        "rtcp-detail",
+        async ({ query, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
+          }
 
-        const count_res = await sql.unsafe(count_qq);
-        const count_total = count_res[0].total;
+          const stream = await sql`
+            select sid, json_agg(
+              to_jsonb(hep_proto_5_default) - sid
+              order by 
+                (protocol_header->>'timeSeconds')::bigint,
+                (protocol_header->>'timeUseconds')::bigint
+            ) as stream
+            from hep_proto_5_default where sid = ${query.sids}
+            group by sid
+          `;
 
-        const offset = (query.page - 1) * query.per_page;
-        qq += `order by start_date desc limit ${query.per_page} offset ${offset}`;
-        const calls = await sql.unsafe(qq);
-        const total_pages = Math.ceil(count_total / query.per_page);
+          const streams = {};
 
-        return {
-          calls: calls,
-          page: query.page,
-          page_size: query.per_page,
-          total: count_total,
-          total_pages: total_pages,
-        };
-      },
-      {
-        query: t.Object({
-          call_id: t.Optional(t.String()),
-          caller: t.Optional(t.String()),
-          callee: t.Optional(t.String()),
-          sip_status: t.Optional(t.String()),
-          page: t.Integer({ minimum: 1, default: 1 }),
-          per_page: t.Integer({ minimum: 5, default: 15, maximum: 500 }),
-          start_date: t.String({ format: "date-time" }),
-          end_date: t.String({ format: "date-time" }),
-          create_date: t.Optional(t.String({ format: "date-time" })),
-        }),
-      }
-    )
+          for (const row of stream) {
+            for (const item of row.stream) {
+              if (item.raw) {
+                try {
+                  item.raw = JSON.parse(item.raw.trim());
+                } catch (e) {
+                  item.raw = null;
+                }
+              }
+              // TODO: manage the other types
+              if (!item.raw || item.raw.type !== 207) continue;
+
+              // TODO: change the key thingy
+              const srcIp = item.protocol_header?.srcIp;
+              const dstIp = item.protocol_header?.dstIp;
+              if (!srcIp || !dstIp) continue;
+              const streamKey = `${srcIp}-${dstIp}`;
+
+              // TODO: iterate report_blocks
+              const report = item.raw.report_blocks?.[0] || {};
+              const xr = item.raw.report_blocks_xr || {};
+
+              // TODO: this is simplified mos calc, do better
+              function calcularMOS(
+                fractionLost: number,
+                jitter: number,
+                delay: number
+              ) {
+                const effectiveDelay = (delay || 0) + 2 * (jitter || 0);
+                let R = 94.2 - effectiveDelay / 2 - fractionLost * 2.5;
+                if (R < 0) R = 0;
+                if (R > 100) R = 100;
+                const MOS = 1 + 0.035 * R + 7e-6 * R * (R - 60) * (100 - R);
+                return Math.max(1, Math.min(4.5, MOS));
+              }
+
+              // TODO: more detailed info
+              const metric = {
+                time: item.protocol_header?.timeSeconds
+                  ? new Date(
+                      Number(item.protocol_header.timeSeconds) * 1000 +
+                        Number(item.protocol_header.timeUseconds) / 1000
+                    ).toISOString()
+                  : null,
+                fraction_lost: report.fraction_lost,
+                packets_lost: report.packets_lost,
+                jitter: report.ia_jitter,
+                delay: xr.round_trip_delay,
+                burst_density: xr.burst_density,
+                gap_density: xr.gap_density,
+                mos: calcularMOS(
+                  report.fraction_lost,
+                  report.ia_jitter,
+                  xr.round_trip_delay
+                ),
+              };
+
+              // TODO: change it, key
+              if (!streams[streamKey]) streams[streamKey] = [];
+              streams[streamKey].push(metric);
+            }
+          }
+          return { streams };
+        },
+        {
+          query: t.Object({
+            sids: t.String(),
+          }),
+        }
+      )
   )
   .group("/users", (app) =>
     app
