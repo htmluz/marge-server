@@ -3,6 +3,7 @@ import { cors } from "@elysiajs/cors";
 import { swagger } from "@elysiajs/swagger";
 import { sql } from "bun";
 import jwt from "@elysiajs/jwt";
+import { RtcpDBRes, RtcpRaw, RtcpStreamGroup } from "./types";
 
 const SEVEN_DAYS_IN_SEC = 604800;
 
@@ -337,43 +338,38 @@ const app = new Elysia()
             return { error: "You are unauthorized" };
           }
 
-          const stream = await sql`
-            select sid, json_agg(
-              to_jsonb(hep_proto_5_default) - sid
-              order by 
-                (protocol_header->>'timeSeconds')::bigint,
-                (protocol_header->>'timeUseconds')::bigint
-            ) as stream
-            from hep_proto_5_default where sid = ${query.sids}
-            group by sid
+          const streams: RtcpStreamGroup[] = await sql`
+            select
+              protocol_header->>'srcIp' AS src_ip,
+              protocol_header->>'srcPort' as src_port,
+              protocol_header->>'dstIp' AS dst_ip,
+              protocol_header->>'dstPort' as dst_port,
+              json_agg(
+                jsonb_build_object(
+                  'timestamp', to_timestamp(
+                    (protocol_header->>'timeSeconds')::bigint +
+                      (protocol_header->>'timeUseconds')::bigint / 1000000.0
+                  ),
+                  'raw', raw::jsonb
+                )
+                order by
+                  (protocol_header->>'timeSeconds')::bigint,
+                  (protocol_header->>'timeUseconds')::bigint
+              ) as streams
+            from
+              hep_proto_5_default
+            where
+              sid = ${query.sids}
+            group by
+              protocol_header->>'srcIp',
+              protocol_header->>'srcPort',
+              protocol_header->>'dstIp',
+              protocol_header->>'dstPort';
           `;
 
-          const streams = {};
-
-          for (const row of stream) {
-            for (const item of row.stream) {
-              if (item.raw) {
-                try {
-                  item.raw = JSON.parse(item.raw.trim());
-                } catch (e) {
-                  item.raw = null;
-                }
-              }
-              // TODO: manage the other types
-              if (!item.raw || item.raw.type !== 207) continue;
-
-              // TODO: change the key thingy
-              const srcIp = item.protocol_header?.srcIp;
-              const dstIp = item.protocol_header?.dstIp;
-              if (!srcIp || !dstIp) continue;
-              const streamKey = `${srcIp}-${dstIp}`;
-
-              // TODO: iterate report_blocks
-              const report = item.raw.report_blocks?.[0] || {};
-              const xr = item.raw.report_blocks_xr || {};
-
-              // TODO: this is simplified mos calc, do better
-              function calcularMOS(
+          for (const stream of streams) {
+            for (const packet of stream.streams) {
+              function calculateMOS(
                 fractionLost: number,
                 jitter: number,
                 delay: number
@@ -385,31 +381,15 @@ const app = new Elysia()
                 const MOS = 1 + 0.035 * R + 7e-6 * R * (R - 60) * (100 - R);
                 return Math.max(1, Math.min(4.5, MOS));
               }
-
-              // TODO: more detailed info
-              const metric = {
-                time: item.protocol_header?.timeSeconds
-                  ? new Date(
-                      Number(item.protocol_header.timeSeconds) * 1000 +
-                        Number(item.protocol_header.timeUseconds) / 1000
-                    ).toISOString()
-                  : null,
-                fraction_lost: report.fraction_lost,
-                packets_lost: report.packets_lost,
-                jitter: report.ia_jitter,
-                delay: xr.round_trip_delay,
-                burst_density: xr.burst_density,
-                gap_density: xr.gap_density,
-                mos: calcularMOS(
-                  report.fraction_lost,
-                  report.ia_jitter,
-                  xr.round_trip_delay
-                ),
-              };
-
-              // TODO: change it, key
-              if (!streams[streamKey]) streams[streamKey] = [];
-              streams[streamKey].push(metric);
+              if (packet.raw.type === 207) {
+                packet.raw["mos"] = calculateMOS(
+                  packet.raw.report_blocks[0].fraction_lost,
+                  packet.raw.report_blocks[0].ia_jitter,
+                  packet.raw.report_blocks_xr.round_trip_delay
+                );
+              } else {
+                packet.raw["mos"] = 0.0;
+              }
             }
           }
           return { streams };
