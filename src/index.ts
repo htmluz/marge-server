@@ -90,7 +90,7 @@ const app = new Elysia()
         group by u.id, u.password_hash
       `;
       if (u.count < 1) {
-        set.status = 400;
+        set.status = 404;
         return { error: "User does not exist" };
       }
       const user = u[0];
@@ -331,6 +331,30 @@ const app = new Elysia()
         }
       )
       .get(
+        "/concurrent-calls",
+        async ({ query, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
+          }
+
+          const concurrentCalls = await sql`
+            select timestamp, concurrent_calls
+            from concurrent_calls_history
+            where timestamp between ${query.start_date} and ${query.end_date} 
+            order by timestamp asc
+          `;
+
+          return { detail: concurrentCalls };
+        },
+        {
+          query: t.Object({
+            start_date: t.String({ format: "date-time" }),
+            end_date: t.String({ format: "date-time" }),
+          }),
+        }
+      )
+      .get(
         "rtcp-detail",
         async ({ query, user, set }) => {
           if (!user) {
@@ -459,7 +483,7 @@ const app = new Elysia()
         return { roles: roles };
       })
       .post(
-        "create",
+        "/create",
         async ({ body, set, user }) => {
           if (!user) {
             set.status = 401;
