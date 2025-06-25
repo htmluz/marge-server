@@ -311,15 +311,52 @@ const app = new Elysia()
           // `;
           // TODO: fix multiple calls
           // TODO: implement rtcp
+          // const calls = await sql`
+          //   select sid, json_agg(
+          //     to_jsonb(hep_proto_1_call) - sid
+          //     order by
+          //       (protocol_header->>'timeSeconds')::bigint,
+          //       (protocol_header->>'timeUseconds')::bigint
+          //   ) as messages
+          //   from hep_proto_1_call where sid = ${call_ids[0]}
+          //   group by sid
+          // `;
           const calls = await sql`
-            select sid, json_agg(
-              to_jsonb(hep_proto_1_call) - sid
-              order by 
-                (protocol_header->>'timeSeconds')::bigint,
-                (protocol_header->>'timeUseconds')::bigint
-            ) as messages
-            from hep_proto_1_call where sid = ${call_ids[0]}
-            group by sid
+            with call_messages as (
+              select sid, 
+                to_jsonb(hep_proto_1_call) - 'sid' as message_data,
+                protocol_header->>'srcIp' as src_ip,
+                protocol_header->>'dstIp' as dst_ip,
+                (protocol_header->>'timeSeconds')::bigint as time_seconds,
+                (protocol_header->>'timeUseconds')::bigint as time_useconds
+              from hep_proto_1_call 
+              where sid = ${call_ids[0]}
+            ),
+            unique_ips AS (
+              select distinct unnest(ARRAY[src_ip, dst_ip]) as ip
+              from call_messages
+            ),
+            ip_mappings AS (
+              select ui.ip, coalesce(inc.name, ui.ip) as name
+              from unique_ips ui
+              left join ip_names_correlation inc on ui.ip = inc.ip
+            ),
+            ip_map_json AS (
+              select jsonb_object_agg(ip, name) as ip_to_name_map
+              from ip_mappings
+            )
+            select 
+              cm.sid,
+              json_agg(
+                cm.message_data || jsonb_build_object(
+                  'srcipname', (select ip_to_name_map->>cm.src_ip from ip_map_json),
+                  'dstipname', (select ip_to_name_map->>cm.dst_ip from ip_map_json)
+                )
+                order by cm.time_seconds, cm.time_useconds
+              ) as messages,
+              (select ip_to_name_map from ip_map_json) as ip_mappings
+            from call_messages cm
+            group by cm.sid;
           `;
           return { detail: calls };
         },
@@ -421,6 +458,74 @@ const app = new Elysia()
         {
           query: t.Object({
             sids: t.String(),
+          }),
+        }
+      )
+      .get(
+        "/trunks",
+        async ({ query, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
+          }
+          const gateways = await sql`
+            select id, ip, name, description from ip_names_correlation order by id asc;
+          `;
+
+          return { gateways };
+        },
+        {
+          query: t.Object({
+            name: t.Optional(t.Array(t.String())),
+            ip: t.Optional(t.Array(t.String())),
+          }),
+        }
+      )
+      .post(
+        "/trunks",
+        async ({ body, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
+          }
+          const { name, ip, description } = body;
+
+          const newTrunk = await sql`
+            insert into ip_names_correlation (ip, name, description)
+            values (${ip}, ${name}, ${description}) returning id
+          `;
+
+          if (!newTrunk) {
+            set.status = 500;
+            return {
+              error:
+                "An error happened while creating the trunk but it was not yours, try again or contact an admin :)",
+            };
+          }
+
+          return {
+            message: `Trunk ${name} - ${ip} has been created with the id ${newTrunk[0].id}`,
+          };
+        },
+        {
+          body: t.Object({
+            name: t.String({ maxLength: 255 }),
+            ip: t.String({ format: "ipv4" }),
+            description: t.Optional(t.String({ maxLength: 255 })),
+          }),
+        }
+      )
+      .delete(
+        "/trunks",
+        async ({ body, user, set }) => {
+          // if (!user) {
+          //   set.status = 401;
+          //   return { error: "You are unauthorized" };
+          // }
+        },
+        {
+          body: t.Object({
+            id: t.Integer(),
           }),
         }
       )
