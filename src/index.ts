@@ -79,54 +79,62 @@ const app = new Elysia()
   .post(
     "/signin",
     async ({ body, set, jwt, jwt_refresh, cookie: { auth } }) => {
-      const { username, password } = body;
-      const u = await sql`
-        select 
-          u.id, u.password_hash, array_agg(ur.role_id) as role_ids, u.full_name
-        from users u
-        inner join user_roles ur
-          on u.id = ur.user_id
-        where u.username = ${username}
-        group by u.id, u.password_hash
-      `;
-      if (u.count < 1) {
-        set.status = 404;
-        return { error: "User does not exist" };
-      }
-      const user = u[0];
-      const roles: number[] = Array.from<number>(user.role_ids);
-      const isPassCorrect = await Bun.password.verify(
-        password,
-        user.password_hash,
-        "bcrypt"
-      );
-      if (!isPassCorrect) {
-        set.status = 400;
-        return { error: "Pasword is incorrect" };
-      }
-      const now = new Date(Date.now());
-      const access_expire_date = new Date(now.getTime() + 2700000);
-      const refresh_expire_date = new Date(
-        now.getTime() + SEVEN_DAYS_IN_SEC * 1000
-      );
+      try {
+        const { username, password } = body;
+        const u = await sql`
+          select 
+            u.id, u.password_hash, array_agg(ur.role_id) as role_ids, u.full_name
+          from users u
+          inner join user_roles ur
+            on u.id = ur.user_id
+          where u.username = ${username}
+          group by u.id, u.password_hash
+        `;
+        if (u.count < 1) {
+          console.log(u);
+          set.status = 404;
+          return { error: "User does not exist" };
+        }
+        const user = u[0];
+        const roles: number[] = Array.from<number>(user.role_ids);
+        const isPassCorrect = await Bun.password.verify(
+          password,
+          user.password_hash,
+          "bcrypt"
+        );
+        if (!isPassCorrect) {
+          set.status = 400;
+          return { error: "Pasword is incorrect" };
+        }
+        const now = new Date(Date.now());
+        const access_expire_date = new Date(now.getTime() + 2700000);
+        const refresh_expire_date = new Date(
+          now.getTime() + SEVEN_DAYS_IN_SEC * 1000
+        );
 
-      const token = await jwt.sign({
-        id: user.id,
-        issue_date: now,
-        exp_date: access_expire_date,
-        roles: roles,
-      });
-      const refresh_token = await jwt_refresh.sign({ id: user.id, date: now });
-      await writeRefreshToken(user.id, refresh_token, refresh_expire_date);
-      auth.set({
-        value: refresh_token,
-        httpOnly: true,
-        maxAge: SEVEN_DAYS_IN_SEC,
-      });
-      return {
-        access_token: token,
-        user: { id: user.id, roles: roles, full_name: user.full_name },
-      };
+        const token = await jwt.sign({
+          id: user.id,
+          issue_date: now,
+          exp_date: access_expire_date,
+          roles: roles,
+        });
+        const refresh_token = await jwt_refresh.sign({
+          id: user.id,
+          date: now,
+        });
+        await writeRefreshToken(user.id, refresh_token, refresh_expire_date);
+        auth.set({
+          value: refresh_token,
+          httpOnly: true,
+          maxAge: SEVEN_DAYS_IN_SEC,
+        });
+        return {
+          access_token: token,
+          user: { id: user.id, roles: roles, full_name: user.full_name },
+        };
+      } catch (e) {
+        console.log(e);
+      }
     },
     {
       body: userSignInSchema,
@@ -205,15 +213,13 @@ const app = new Elysia()
 
           let where_clauses: string[] = [];
 
+          // TODO: refatorar isso aqui daquele jeito
           if (query.sid) {
             if (query.sid.includes("*")) {
               where_clauses.push(`sid like '${query.sid.replace(/\*/g, "%")}'`);
             } else {
               where_clauses.push(`sid = '${query.sid}'`);
             }
-          }
-          if (query.create_date) {
-            where_clauses.push(`create_date = '${query.create_date}'`);
           }
           if (query.caller) {
             if (query.caller.includes("*")) {
@@ -233,26 +239,17 @@ const app = new Elysia()
               where_clauses.push(`callee = '${query.callee}'`);
             }
           }
-          if (query.sip_status) {
-            if (query.sip_status.includes("*")) {
-              where_clauses.push(
-                `sip_status like '${query.sip_status.replace(/\*/g, "%")}'`
-              );
-            } else {
-              where_clauses.push(`sip_status = '${query.sip_status}'`);
-            }
-          }
 
           let qq = `
-          select sid, create_date, start_date, end_date, caller, callee, sip_status
+          select sid, create_date, caller, callee
           from hep_brief_call_records
-          where start_date >= '${query.start_date}' and start_date <= '${query.end_date}'
+          where create_date >= '${query.start_date}' and create_date <= '${query.end_date}'
         `;
 
           let count_qq = `
           select count(*) as total
           from hep_brief_call_records
-          where start_date >= '${query.start_date}' and start_date <= '${query.end_date}'
+          where create_date >= '${query.start_date}' and create_date <= '${query.end_date}'
         `;
 
           if (where_clauses.length > 0) {
@@ -264,7 +261,7 @@ const app = new Elysia()
           const count_total = count_res[0].total;
 
           const offset = (query.page - 1) * query.per_page;
-          qq += `order by start_date desc limit ${query.per_page} offset ${offset}`;
+          qq += `order by create_date desc limit ${query.per_page} offset ${offset}`;
           const calls = await sql.unsafe(qq);
           const total_pages = Math.ceil(count_total / query.per_page);
 
@@ -281,12 +278,10 @@ const app = new Elysia()
             sid: t.Optional(t.String()),
             caller: t.Optional(t.String()),
             callee: t.Optional(t.String()),
-            sip_status: t.Optional(t.String()),
             page: t.Integer({ minimum: 1, default: 1 }),
             per_page: t.Integer({ minimum: 5, default: 15, maximum: 500 }),
             start_date: t.String({ format: "date-time" }),
             end_date: t.String({ format: "date-time" }),
-            create_date: t.Optional(t.String({ format: "date-time" })),
           }),
         }
       )
@@ -299,28 +294,13 @@ const app = new Elysia()
           }
           const call_ids = query.sids;
           if (call_ids.length < 1) return { detail: [] };
-          // const calls = await sql`
-          //   select sid, json_agg(
-          //     to_jsonb(hep_proto_1_call) - sid
-          //     order by
-          //       (protocol_header->>'timeSeconds')::bigint,
-          //       (protocol_header->>'timeUseconds')::bigint
-          //   ) as calls
-          //   from hep_proto_1_call where sid in ${sql(call_ids)}
-          //   group by sid
-          // `;
-          // TODO: fix multiple calls
-          // TODO: implement rtcp
-          // const calls = await sql`
-          //   select sid, json_agg(
-          //     to_jsonb(hep_proto_1_call) - sid
-          //     order by
-          //       (protocol_header->>'timeSeconds')::bigint,
-          //       (protocol_header->>'timeUseconds')::bigint
-          //   ) as messages
-          //   from hep_proto_1_call where sid = ${call_ids[0]}
-          //   group by sid
-          // `;
+
+          interface fodase {
+            call_id: string;
+          }
+          const zz: fodase[] = call_ids.map((z) => {
+            return { call_id: z };
+          });
           const calls = await sql`
             with call_messages as (
               select sid, 
@@ -330,7 +310,7 @@ const app = new Elysia()
                 (protocol_header->>'timeSeconds')::bigint as time_seconds,
                 (protocol_header->>'timeUseconds')::bigint as time_useconds
               from hep_proto_1_call 
-              where sid = ${call_ids[0]}
+              where sid in ${sql(zz, "call_id")}
             ),
             unique_ips AS (
               select distinct unnest(ARRAY[src_ip, dst_ip]) as ip
@@ -368,24 +348,81 @@ const app = new Elysia()
         }
       )
       .get(
-        "/concurrent-calls",
+        "registers-domains",
         async ({ query, user, set }) => {
           if (!user) {
             set.status = 401;
             return { error: "You are unauthorized" };
           }
 
-          const concurrentCalls = await sql`
-            select timestamp, concurrent_calls
-            from concurrent_calls_history
-            where timestamp between ${query.start_date} and ${query.end_date} 
-            order by timestamp asc
+          const { start_date, end_date } = query;
+          const domains = await sql`
+            select array_agg(distinct hpr.data_header ->> 'ruri_domain') as domains
+            from hep_proto_1_registration hpr
+            where hpr.data_header ->> 'method' = 'REGISTER' and hpr.create_date >= ${start_date} and hpr.create_date <= ${end_date};
           `;
-
-          return { detail: concurrentCalls };
+          return { data: domains[0].domains };
         },
         {
           query: t.Object({
+            start_date: t.String({ format: "date-time" }),
+            end_date: t.String({ format: "date-time" }),
+          }),
+        }
+      )
+      .get(
+        "registers-watch",
+        async ({ query, user, set }) => {
+          if (!user) {
+            set.status = 401;
+            return { error: "You are unauthorized" };
+          }
+
+          const { domain, users, start_date, end_date } = query;
+
+          let packets = [];
+
+          if (users) {
+            interface fodase {
+              users: string;
+            }
+            const zz: fodase[] = users.map((z) => {
+              return { users: z };
+            });
+
+            // packets = await sql`
+            // select * from hep_proto_1_registration hpr
+            // where hpr.data_header ->> 'ruri_domain' = ${domain} and hpr.create_date >= ${start_date} and hpr.create_date <= ${end_date}
+            // and hpr.data_header ->> 'from_user' in ${sql(zz, "users")};`;
+            packets = await sql`
+              select t1.* from hep_proto_1_registration t1
+              join (
+                select distinct hpr.sid 
+                from hep_proto_1_registration hpr 
+                where hpr.data_header ->> 'ruri_domain' = ${domain} and hpr.create_date >= ${start_date} and hpr.create_date <= ${end_date} and hpr.data_header ->> 'from_user' in ${sql(
+              zz,
+              "users"
+            )}
+              ) as filtered_sids
+              on t1.sid = filtered_sids.sid
+              where t1.create_date >= ${start_date} and t1.create_date <= ${end_date};`;
+          } else {
+            packets = await sql`
+                select t1.* from hep_proto_1_registration t1
+                join (
+                  select distinct hpr.sid 
+                  from hep_proto_1_registration hpr 
+                  where hpr.data_header ->> 'ruri_domain' = ${domain} and hpr.create_date >= ${start_date} and hpr.create_date <= ${end_date}) as filtered_sids
+                on t1.sid = filtered_sids.sid
+                where t1.create_date >= ${start_date} and t1.create_date <= ${end_date};`;
+          }
+
+          return { data: packets };
+        },
+        {
+          query: t.Object({
+            domain: t.String({ minLength: 1 }),
+            users: t.Optional(t.Array(t.String())),
             start_date: t.String({ format: "date-time" }),
             end_date: t.String({ format: "date-time" }),
           }),
