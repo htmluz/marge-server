@@ -3,14 +3,14 @@ import { cors } from "@elysiajs/cors";
 import { swagger } from "@elysiajs/swagger";
 import { sql } from "bun";
 import jwt from "@elysiajs/jwt";
-import { RtcpDBRes, RtcpRaw, RtcpStreamGroup } from "./types";
+import { RtcpStreamGroup } from "./types";
 
 const SEVEN_DAYS_IN_SEC = 604800;
 
 const userSignUpSchema = t.Object({
   username: t.String({ minLength: 3 }),
   email: t.String({ format: "email" }),
-  password: t.String(),
+  password: t.String({ minLength: 8 }),
   full_name: t.String(),
   roles: t.Optional(t.Array(t.Integer())),
 });
@@ -140,6 +140,65 @@ const app = new Elysia()
       body: userSignInSchema,
     }
   )
+  .post(
+    "/change-password",
+    async ({ body, user, set }) => {
+      if (!user) {
+        set.status = 401;
+        return { error: "You are unauthorized" };
+      }
+      const { id, old_password, new_password } = body;
+
+      if (old_password === new_password) {
+        set.status = 400;
+        return {
+          message: "Your new password should not match your old password",
+        };
+      }
+
+      const zz = await sql`
+        select 
+          u.password_hash
+        from users u
+        where u.id = ${id};
+      `;
+
+      if (zz.count < 1) {
+        set.status = 404;
+        return { message: "User does not exist" };
+      }
+
+      const pass_hash = zz[0].password_hash;
+      const isPassCorrect = await Bun.password.verify(
+        old_password,
+        pass_hash,
+        "bcrypt"
+      );
+
+      if (!isPassCorrect) {
+        set.status = 400;
+        return { message: "Your password is incorrect" };
+      }
+
+      const new_pass_hash = await Bun.password.hash(new_password, "bcrypt");
+
+      const new_pass_update = await sql`
+        update users
+        set password_hash = ${new_pass_hash}
+        where id = ${id};
+      `;
+
+      console.log(new_pass_update);
+      return { message: "Password changed successfully" };
+    },
+    {
+      body: t.Object({
+        id: t.Integer(),
+        old_password: t.String(),
+        new_password: t.String({ minLength: 8 }),
+      }),
+    }
+  )
   .get(
     "/refresh_token",
     async ({ jwt_refresh, jwt, cookie: { auth }, set }) => {
@@ -213,7 +272,6 @@ const app = new Elysia()
 
           let where_clauses: string[] = [];
 
-          // TODO: refatorar isso aqui daquele jeito
           if (query.sid) {
             if (query.sid.includes("*")) {
               where_clauses.push(`sid like '${query.sid.replace(/\*/g, "%")}'`);
@@ -241,16 +299,16 @@ const app = new Elysia()
           }
 
           let qq = `
-          select sid, create_date, caller, callee
-          from hep_brief_call_records
-          where create_date >= '${query.start_date}' and create_date <= '${query.end_date}'
-        `;
+            select sid, create_date, caller, callee
+            from hep_brief_call_records
+            where create_date >= '${query.start_date}' and create_date <= '${query.end_date}'
+          `;
 
           let count_qq = `
-          select count(*) as total
-          from hep_brief_call_records
-          where create_date >= '${query.start_date}' and create_date <= '${query.end_date}'
-        `;
+            select count(*) as total
+            from hep_brief_call_records
+            where create_date >= '${query.start_date}' and create_date <= '${query.end_date}'
+          `;
 
           if (where_clauses.length > 0) {
             qq += "and " + where_clauses.join(" and ");
@@ -390,10 +448,6 @@ const app = new Elysia()
               return { users: z };
             });
 
-            // packets = await sql`
-            // select * from hep_proto_1_registration hpr
-            // where hpr.data_header ->> 'ruri_domain' = ${domain} and hpr.create_date >= ${start_date} and hpr.create_date <= ${end_date}
-            // and hpr.data_header ->> 'from_user' in ${sql(zz, "users")};`;
             packets = await sql`
               select t1.* from hep_proto_1_registration t1
               join (
@@ -638,7 +692,9 @@ const app = new Elysia()
           `;
           if (uu.count > 0) {
             set.status = 400;
-            return { error: "User already exists" };
+            return {
+              error: "User with this email or username already exists.",
+            };
           }
           const pass_hash = await Bun.password.hash(password, "bcrypt");
           const newUser = await sql`
@@ -672,5 +728,5 @@ const app = new Elysia()
   .listen(3000);
 
 console.log(
-  `🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`
+  `Marge-Server is running at ${app.server?.hostname}:${app.server?.port} 🤕`
 );
