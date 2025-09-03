@@ -21,7 +21,7 @@ jobs:
 
       - name: build
         run: |
-          docker build -t ${{ secrests.DOCKERHUB_USERNAME }}/marge-server:latest .
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/marge-server:latest .
 
       - name: push
         run: |
