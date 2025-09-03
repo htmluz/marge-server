@@ -19,10 +19,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: build 
-        run |
+      - name: build
+        run: |
           docker build -t ${{ secrests.DOCKERHUB_USERNAME }}/marge-server:latest .
 
       - name: push
-        run |
+        run: |
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/marge-server:latest
